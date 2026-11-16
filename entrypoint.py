@@ -136,9 +136,8 @@ def apply_patches():
 
 def run_command(command):
     # Run command
-    import os
     env = os.environ.copy()
-    env["PIP_EXTRA_ARGS"] = "--break-system-packages"
+    env["PIP_BREAK_SYSTEM_PACKAGES"] = "1"
     retcode = subprocess.check_call(command, shell=True, env=env)
     if retcode:
         print(f'::error::Error while executing command "{command}"')
