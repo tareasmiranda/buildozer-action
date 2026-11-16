@@ -1,25 +1,32 @@
-FROM kivy/buildozer:1.5.0
-# See https://github.com/kivy/buildozer/blob/master/Dockerfile
+FROM ubuntu:24.04
 
-# Buildozer will be installed in entrypoint.py
-# This is needed to install version specified by user
-RUN pip3 uninstall -y buildozer
+ENV DEBIAN_FRONTEND=noninteractive
+ENV USER=user
+ENV HOME=/home/user
 
-# Get the latest JDK version as Buildozer requires the latest version to build the APK
-RUN sudo apt-get update && \
-    sudo apt-get install -y software-properties-common && \
-    sudo rm -rf /var/lib/apt/lists/*
-RUN sudo apt update
-RUN sudo apt-get -y install openjdk-17-jdk
+# Install system dependencies required by Buildozer / python-for-android
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv \
+    openjdk-17-jdk \
+    git zip unzip wget curl \
+    autoconf automake libtool pkg-config \
+    zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 \
+    cmake libffi-dev libssl-dev \
+    build-essential ccache \
+    sudo \
+    && rm -rf /var/lib/apt/lists/*
 
-# Remove a lot of warnings
-# sudo: setrlimit(RLIMIT_CORE): Operation not permitted
-# See https://github.com/sudo-project/sudo/issues/42
-RUN echo "Set disable_coredump false" | sudo tee -a /etc/sudo.conf > /dev/null
+# Create the 'user' account (the action's entrypoint expects it)
+RUN useradd -m -s /bin/bash user && \
+    echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/user
 
-# By default Python buffers output and you see prints after execution
-# Set env variable to disable this behavior
-ENV PYTHONUNBUFFERED=1
+USER user
+WORKDIR /home/user
 
-COPY entrypoint.py /action/entrypoint.py
+# Install Buildozer (the action will overwrite this with the version you pin)
+RUN pip3 install --user --upgrade buildozer
+
+# The action will copy entrypoint.py and requirements.txt later
+COPY --chown=user:user requirements.txt entrypoint.py /action/
+
 ENTRYPOINT ["/action/entrypoint.py"]
