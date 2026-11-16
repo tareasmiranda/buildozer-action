@@ -11,6 +11,7 @@ order.
 """
 
 import os
+import pwd
 import subprocess
 import sys
 from os import environ as env
@@ -29,11 +30,14 @@ def main():
     change_owner("root", repository_root)
 
 
-def change_owner(user, repository_root):
-    # GitHub sets root as owner of repository directory. Change it to user
-    # And return to root after all commands
-    subprocess.check_call(["sudo", "chown", "-R", user, repository_root])
-
+def change_owner(user, path):
+    # If the named user doesn't exist in this container, fall back to
+    # the numeric UID:GID of the current process (chown accepts numbers).
+    try:
+        pwd.getpwnam(user)
+    except KeyError:
+        user = f"{os.getuid()}:{os.getgid()}"
+    subprocess.check_call(["sudo", "chown", "-R", user, path])
 
 def fix_home():
     # GitHub sets HOME to /github/home, but Buildozer is installed to /home/user. Change HOME to user's home
