@@ -1,4 +1,4 @@
-FROM ghcr.io/kivy/buildozer:latest
+FROM kivy/buildozer:1.5.0
 # See https://github.com/kivy/buildozer/blob/master/Dockerfile
 
 # Buildozer will be installed in entrypoint.py
