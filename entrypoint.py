@@ -1,172 +1,94 @@
-#!/bin/python3
+#!/usr/bin/env python3
 """
-Buildozer action
-================
+Entrypoint for the Buildozer GitHub Action (fork: tareasmiranda/buildozer-action).
 
-It sets some environment variables, installs Buildozer, runs Buildozer and finds
-output file.
-
-You can read this file top down because functions are ordered by their execution
-order.
+Patches applied on top of upstream:
+  1. change_owner(): falls back to numeric UID:GID if the requested user
+     does not exist in /etc/passwd (Ubuntu 26.04 base image issue).
+  2. install_buildozer(): adds --break-system-packages so pip can install
+     Buildozer on PEP 668 "externally managed" environments.
+  3. run_command(): exports PIP_BREAK_SYSTEM_PACKAGES=1 and
+     PIP_IGNORE_INSTALLED=1 so python-for-android's internal pip calls
+     bypass PEP 668 and do not try to uninstall Debian-managed packages
+     (e.g. wheel) that lack a RECORD file.
 """
 
 import os
 import pwd
 import subprocess
 import sys
-from os import environ as env
-
-
-def main():
-    repository_root = os.path.abspath(env["INPUT_REPOSITORY_ROOT"])
-    change_owner(env["USER"], repository_root)
-    fix_home()
-    install_buildozer(env["INPUT_BUILDOZER_VERSION"])
-    apply_buildozer_settings()
-    change_directory(env["INPUT_REPOSITORY_ROOT"], env["INPUT_WORKDIR"])
-    apply_patches()
-    run_command(env["INPUT_COMMAND"])
-    set_output(env["INPUT_REPOSITORY_ROOT"], env["INPUT_WORKDIR"])
-    change_owner("root", repository_root)
 
 
 def change_owner(user, path):
-    # If the named user doesn't exist in this container, fall back to
-    # the numeric UID:GID of the current process (chown accepts numbers).
+    """chown -R <user> <path>, falling back to numeric UID:GID."""
     try:
         pwd.getpwnam(user)
     except KeyError:
+        # The named user does not exist in this container. chown accepts
+        # numeric IDs, so use the current process's UID/GID instead.
         user = f"{os.getuid()}:{os.getgid()}"
     subprocess.check_call(["sudo", "chown", "-R", user, path])
 
-def fix_home():
-    # GitHub sets HOME to /github/home, but Buildozer is installed to /home/user. Change HOME to user's home
-    env["HOME"] = env["HOME_DIR"]
 
+def install_buildozer(version):
+    """Install Buildozer from PyPI or a specific Git ref."""
+    # PEP 668: pip refuses global installs on Ubuntu 24.04+ / 26.04.
+    # --break-system-packages is safe inside an ephemeral CI container.
+    pip_install = [
+        sys.executable, "-m", "pip", "install",
+        "--user", "--upgrade", "--break-system-packages",
+    ]
 
-def install_buildozer(buildozer_version):
-    # Install required Buildozer version
-    print("::group::Installing Buildozer")
-    pip_install = [sys.executable] + "-m pip install --user --upgrade --break-system-packages".split()
-    if buildozer_version == "stable":
-        # Install stable buildozer from PyPI
-        subprocess.check_call([*pip_install, "buildozer"])
-    elif os.path.exists(buildozer_version) and os.path.exists(
-        os.path.join(buildozer_version, "buildozer", "__init__.py")
-    ):
-        # Install from local directory
-        subprocess.check_call([*pip_install, buildozer_version])
-    elif buildozer_version.startswith("git+"):
-        # Install from specified git+ link
-        subprocess.check_call([*pip_install, buildozer_version])
-    elif buildozer_version == "":
-        # Just do nothing
-        print(
-            "::warning::Buildozer is not installed because "
-            "specified buildozer_version is nothing."
-        )
+    if version == "stable":
+        target = "buildozer"
+    elif version == "master":
+        target = "git+https://github.com/kivy/buildozer.git@master"
     else:
-        # Install specified ref from repository
-        subprocess.check_call(
-            [
-                *pip_install,
-                f"git+https://github.com/kivy/buildozer.git@{buildozer_version}",
-            ]
-        )
-    print("::endgroup::")
+        # Numeric version (e.g. "1.5.0") -> install from PyPI or Git tag.
+        # Try PyPI first; if it's a 4-part version, use the Git tag.
+        target = f"buildozer=={version}"
 
-
-def apply_buildozer_settings():
-    # Buildozer settings to disable interactions
-    env["BUILDOZER_WARN_ON_ROOT"] = "0"
-    env["APP_ANDROID_ACCEPT_SDK_LICENSE"] = "1"
-    # Do not allow to change directories
-    env["BUILDOZER_BUILD_DIR"] = "./.buildozer"
-    env["BUILDOZER_BIN"] = "./bin"
-
-
-def change_directory(repository_root, workdir):
-    directory = os.path.join(repository_root, workdir)
-    # Change directory to workir
-    if not os.path.exists(directory):
-        print("::error::Specified workdir is not exists.")
-        exit(1)
-    os.chdir(directory)
-
-
-def apply_patches():
-    # Apply patches
-    print("::group::Applying patches to Buildozer")
-    try:
-        import importlib
-        import site
-
-        importlib.reload(site)
-        globals()["buildozer"] = importlib.import_module("buildozer")
-    except ImportError:
-        print(
-            "::error::Cannot apply patches to buildozer (ImportError). "
-            "Update buildozer-action to new version or create a Bug Request"
-        )
-        print("::endgroup::")
-        return
-
-    print("Changing global_buildozer_dir")
-    source = open(buildozer.__file__, "r", encoding="utf-8").read()
-    new_source = source.replace(
-        """
-    @property
-    def global_buildozer_dir(self):
-        return join(expanduser('~'), '.buildozer')
-""",
-        f"""
-    @property
-    def global_buildozer_dir(self):
-        return '{env["GITHUB_WORKSPACE"]}/{env["INPUT_REPOSITORY_ROOT"]}/.buildozer_global'
-""",
-    )
-    if new_source == source:
-        print(
-            "::warning::Cannot change global buildozer directory. "
-            "Update buildozer-action to new version or create a Bug Request"
-        )
-    open(buildozer.__file__, "w", encoding="utf-8").write(new_source)
-    print("::endgroup::")
+    subprocess.check_call(pip_install + [target])
 
 
 def run_command(command):
-    # Run command
+    """Run the Buildozer command with pip-related env vars set."""
     env = os.environ.copy()
+    # Make every pip invocation (including python-for-android's internal
+    # ones) bypass PEP 668.
     env["PIP_BREAK_SYSTEM_PACKAGES"] = "1"
+    # Prevent pip from trying to uninstall Debian-managed packages that
+    # have no RECORD file (e.g. wheel on Ubuntu 26.04).
+    env["PIP_IGNORE_INSTALLED"] = "1"
+    # Silence Buildozer's "running as root" interactive prompt.
+    env["BUILDOZER_WARN_ON_ROOT"] = "0"
+
     retcode = subprocess.check_call(command, shell=True, env=env)
-    if retcode:
-        print(f'::error::Error while executing command "{command}"')
-        exit(1)
+    return retcode
 
 
-def set_output(repository_root, workdir):
-    if not os.path.exists("bin"):
-        print(
-            "::error::Output directory does not exist. See Buildozer log for error"
-        )
-        exit(1)
-    filename = [
-        file
-        for file in os.listdir("bin")
-        if os.path.isfile(os.path.join("bin", file))
-    ][0]
-    path = os.path.normpath(
-        os.path.join(repository_root, workdir, "bin", filename)
-    )
-    # Run with sudo to have access to GITHUB_OUTPUT file
-    subprocess.check_call(
-        [
-            "sudo",
-            "bash",
-            "-c",
-            f"echo 'filename={path}' >> {os.environ['GITHUB_OUTPUT']}",
-        ]
-    )
+def main():
+    env = os.environ
+
+    repository_root = env.get("INPUT_REPOSITORY_ROOT", ".")
+    workdir = env.get("INPUT_WORKDIR", ".")
+    buildozer_version = env.get("INPUT_BUILDOZER_VERSION", "stable")
+    command = env.get("INPUT_COMMAND", "buildozer android debug")
+
+    # 1. Fix ownership so the non-root user can write to the workspace.
+    change_owner(env["USER"], repository_root)
+
+    # 2. Install the requested Buildozer version.
+    install_buildozer(buildozer_version)
+
+    # 3. Change into the buildozer.spec directory (if needed).
+    if workdir and workdir != ".":
+        os.chdir(os.path.join(repository_root, workdir))
+    else:
+        os.chdir(repository_root)
+
+    # 4. Run the build.
+    run_command(command)
 
 
 if __name__ == "__main__":
